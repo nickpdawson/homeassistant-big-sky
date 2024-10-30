@@ -29,15 +29,14 @@ Separate Lift and Trail Entities: Choose whether to create individual entities f
 Example YAML Configuration
 If you'd prefer YAML configuration, add the following to your configuration.yaml:
 
-yaml
-Copy code
-big_sky:
+
+```big_sky:
   feed_url: "https://example.com/your-feed-url"
   update_interval: 60  # in minutes
   create_lift_entities: true
   create_run_entities: true
 Development and Contributions
-Pull requests are welcome! Please submit issues or feature requests if you have ideas or improvements.
+Pull requests are welcome! Please submit issues or feature requests if you have ideas or improvements.```
 
 Acknowledgments
 Data provided by Big Sky Resort.
