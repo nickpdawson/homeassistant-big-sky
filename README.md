@@ -35,13 +35,12 @@ If you'd prefer YAML configuration, add the following to your configuration.yaml
   update_interval: 60  # in minutes
   create_lift_entities: true
   create_run_entities: true
+```
 Development and Contributions
 Pull requests are welcome! Please submit issues or feature requests if you have ideas or improvements.```
 
 Acknowledgments
 Data provided by Big Sky Resort.
-Special thanks to Home Assistant's community for supporting open integrations.
-vbnet
-Copy code
+
 
 This `README.md` includes an overview, installation instructions, configuration optio
