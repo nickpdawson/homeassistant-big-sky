@@ -1,34 +1,75 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "title": "Big Sky Resort Configuration",
-                "description": "Configure Big Sky Resort integration. Creating individual entities enables detailed control and automation but uses more resources. Default update interval is 15 minutes.",
-                "data": {
-                    "feed_url": "Resort XML Feed URL (typically ends in /mtnxml/162)",
-                    "create_lift_entities": "Create separate entity for each lift (allows individual automation)",
-                    "create_run_entities": "Create separate entity for each trail (enables detailed status tracking)",
-                    "update_interval": "How often to fetch new data (in minutes)"
-                }
-            }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Big Sky Resort",
+        "description": "Reads the Big Sky mountain report. Lift and trail entities add about 360 entities.",
+        "data": {
+          "feed_url": "Feed URL",
+          "create_lift_entities": "Create an entity for each lift",
+          "create_run_entities": "Create an entity for each trail",
+          "update_interval": "Update interval (minutes)"
         },
-        "abort": {
-            "single_instance_allowed": "Only one Big Sky Resort configuration is allowed.",
-            "cannot_connect": "Failed to connect to resort feed"
+        "data_description": {
+          "feed_url": "Must be https. The default is the Big Sky feed.",
+          "update_interval": "How often to fetch the feed. The resort updates it a few times a day."
         }
+      }
     },
-    "options": {
-        "step": {
-            "init": {
-                "title": "Big Sky Resort Options",
-                "description": "Update configuration settings for Big Sky Resort integration.",
-                "data": {
-                    "feed_url": "Resort XML Feed URL",
-                    "create_lift_entities": "Create Individual Lift Entities",
-                    "create_run_entities": "Create Individual Trail Entities",
-                    "update_interval": "Update Interval (1-60 minutes)"
-                }
-            }
-        }
+    "error": {
+      "invalid_url": "This is not a valid URL.",
+      "https_required": "The feed URL must start with https://.",
+      "cannot_connect": "Could not read the feed. Check the URL and try again.",
+      "feed_too_large": "The response is over 2 MB, so it is not the resort feed."
+    },
+    "abort": {
+      "already_configured": "Big Sky Resort is already set up.",
+      "single_instance_allowed": "Big Sky Resort is already set up."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Big Sky Resort options",
+        "data": {
+          "feed_url": "Feed URL",
+          "create_lift_entities": "Create an entity for each lift",
+          "create_run_entities": "Create an entity for each trail",
+          "update_interval": "Update interval (minutes)"
+        },
+        "data_description": {
+          "create_lift_entities": "Turning this off removes the lift entities.",
+          "create_run_entities": "Turning this off removes the trail entities."
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "This is not a valid URL.",
+      "https_required": "The feed URL must start with https://.",
+      "cannot_connect": "Could not read the feed. Check the URL and try again.",
+      "feed_too_large": "The response is over 2 MB, so it is not the resort feed."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "resort_status": { "name": "Resort status" },
+      "snowmaking": { "name": "Snowmaking" },
+      "lift": { "name": "Lift {name}" },
+      "trail": { "name": "Trail {name}" }
+    },
+    "sensor": {
+      "snow_depth": { "name": "Snow depth" },
+      "snowfall_24h": { "name": "Snowfall 24h" },
+      "snowfall_48h": { "name": "Snowfall 48h" },
+      "snowfall_72h": { "name": "Snowfall 72h" },
+      "snowfall_7d": { "name": "Snowfall 7 days" },
+      "forecast_high": { "name": "Forecast high today" },
+      "terrain_parks": { "name": "Terrain parks open" },
+      "trails_open": { "name": "Trails open" },
+      "lifts_open": { "name": "Lifts open" },
+      "tram": { "name": "Tram" },
+      "parking": { "name": "Parking lots open" },
+      "shuttle": { "name": "Shuttle" }
+    }
+  }
 }
