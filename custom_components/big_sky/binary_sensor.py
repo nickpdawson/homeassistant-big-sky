@@ -7,13 +7,14 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_CREATE_LIFT_ENTITIES, CONF_CREATE_RUN_ENTITIES
 from .coordinator import BigSkyConfigEntry, BigSkyCoordinator, entry_config
 from .entity import BigSkyEntity
 from .feed import Lift, Trail, is_open
+from .migration import async_migrate_unique_ids
 
 
 async def async_setup_entry(
@@ -24,19 +25,46 @@ async def async_setup_entry(
     """Set up Big Sky binary sensors."""
     coordinator = entry.runtime_data
     config = entry_config(entry)
-    data = coordinator.data
+    create_lifts = config.get(CONF_CREATE_LIFT_ENTITIES, True)
+    create_trails = config.get(CONF_CREATE_RUN_ENTITIES, True)
 
-    entities: list[BinarySensorEntity] = [
-        BigSkyResortStatusBinarySensor(coordinator),
-        BigSkySnowmakingBinarySensor(coordinator),
-    ]
-    if config.get(CONF_CREATE_LIFT_ENTITIES, True):
-        entities.extend(BigSkyLiftBinarySensor(coordinator, lift) for lift in data.lifts.values())
-    if config.get(CONF_CREATE_RUN_ENTITIES, True):
-        entities.extend(
-            BigSkyTrailBinarySensor(coordinator, trail) for trail in data.trails.values()
+    async_add_entities(
+        [BigSkyResortStatusBinarySensor(coordinator), BigSkySnowmakingBinarySensor(coordinator)]
+    )
+
+    added_lifts: set[str] = set()
+    added_trails: set[str] = set()
+
+    # The feed switches between summer and winter content, so lifts and
+    # trails can appear long after setup.
+    @callback
+    def _add_new_items() -> None:
+        data = coordinator.data
+        new_lifts = (
+            [lift for key, lift in data.lifts.items() if key not in added_lifts]
+            if create_lifts
+            else []
         )
-    async_add_entities(entities)
+        new_trails = (
+            [trail for key, trail in data.trails.items() if key not in added_trails]
+            if create_trails
+            else []
+        )
+        if not new_lifts and not new_trails:
+            return
+        # A legacy registry entry for a returning item must get its new
+        # unique_id before the entity is added, or it gets a duplicate.
+        async_migrate_unique_ids(hass, entry, data)
+        added_lifts.update(lift.key for lift in new_lifts)
+        added_trails.update(trail.key for trail in new_trails)
+        entities: list[BinarySensorEntity] = [
+            BigSkyLiftBinarySensor(coordinator, lift) for lift in new_lifts
+        ]
+        entities.extend(BigSkyTrailBinarySensor(coordinator, trail) for trail in new_trails)
+        async_add_entities(entities)
+
+    _add_new_items()
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_items))
 
 
 class BigSkyResortStatusBinarySensor(BigSkyEntity, BinarySensorEntity):

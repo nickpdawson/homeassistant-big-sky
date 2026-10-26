@@ -67,6 +67,10 @@ high sensor both show today's forecast high.
 Get the forecast with the `weather.get_forecasts` action and `type: daily`.
 Each day carries a real date, starting from the day the report was issued.
 
+New lifts and trails get entities on the next fetch that lists them, with
+no restart. Lifts and trails missing from the feed are not deleted; they
+stay unavailable until the season changes back.
+
 ## Troubleshooting
 
 Turn on debug logging in `configuration.yaml`:
@@ -86,8 +90,10 @@ settings and the last parsed feed.
 - **Off season**: the feed keeps publishing in summer with everything
   closed, so lift and trail sensors read off and counts read 0. Snow values
   can be blank, which shows as unknown.
-- **A lift or trail shows unavailable**: the resort removed or renamed it
-  in the feed. Delete the entity if it does not come back.
+- **A lift or trail shows unavailable**: it is missing from the feed. The
+  resort drops some lifts and trails between seasons, so the entity stays
+  unavailable until the season changes back. If the resort renamed or
+  removed it for good, delete the entity.
 
 ## Breaking changes in 2.0.0
 
