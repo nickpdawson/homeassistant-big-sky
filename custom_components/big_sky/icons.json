@@ -1,0 +1,21 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "resort_status": { "default": "mdi:ski" },
+      "snowmaking": { "default": "mdi:snowflake" }
+    },
+    "sensor": {
+      "snow_depth": { "default": "mdi:ruler" },
+      "snowfall_24h": { "default": "mdi:weather-snowy-heavy" },
+      "snowfall_48h": { "default": "mdi:weather-snowy-heavy" },
+      "snowfall_72h": { "default": "mdi:weather-snowy-heavy" },
+      "snowfall_7d": { "default": "mdi:weather-snowy-heavy" },
+      "terrain_parks": { "default": "mdi:snowboard" },
+      "trails_open": { "default": "mdi:ski" },
+      "lifts_open": { "default": "mdi:ski-lift" },
+      "tram": { "default": "mdi:gondola" },
+      "parking": { "default": "mdi:parking" },
+      "shuttle": { "default": "mdi:bus" }
+    }
+  }
+}

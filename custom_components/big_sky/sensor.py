@@ -1,288 +1,222 @@
-"""Sensor platform for Big Sky Resort."""
+"""Sensors for Big Sky Resort."""
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfLength, UnitOfPrecipitationDepth, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.const import (
-    UnitOfLength,
-    UnitOfTemperature,
-    PERCENTAGE,
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .coordinator import BigSkyConfigEntry, BigSkyCoordinator
+from .entity import BigSkyEntity
+from .feed import Lift, ResortData, is_open
+
+DIFFICULTIES = (
+    "beginner",
+    "intermediate",
+    "advanced_intermediate",
+    "advanced",
+    "expert",
+    "high_exposure",
 )
 
-from .const import DOMAIN
+
+@dataclass(frozen=True, kw_only=True)
+class BigSkySensorDescription(SensorEntityDescription):
+    value_fn: Callable[[ResortData], float | int | str | None]
+    attrs_fn: Callable[[ResortData], dict[str, Any]] | None = None
+
+
+def _snow(key: str, value_fn: Callable[[ResortData], float | None]) -> BigSkySensorDescription:
+    return BigSkySensorDescription(
+        key=key,
+        translation_key=key,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPrecipitationDepth.INCHES,
+        value_fn=value_fn,
+    )
+
+
+def _find_tram(data: ResortData) -> Lift | None:
+    return next(
+        (lift for lift in data.lifts.values() if "tram" in (lift.type or "").lower()),
+        None,
+    )
+
+
+def _tram_attrs(data: ResortData) -> dict[str, Any]:
+    if (tram := _find_tram(data)) is None:
+        return {}
+    return {
+        "name": tram.name,
+        "capacity": tram.capacity,
+        "type": tram.type,
+        "status_detail": tram.status_detail,
+        "open_time": tram.open_time,
+        "close_time": tram.close_time,
+        "skier_wait_time": tram.skier_wait_time,
+        "scenic_wait_time": tram.scenic_wait_time,
+        "serviced_trails": [
+            {
+                "name": trail.name,
+                "status": trail.status,
+                "difficulty": trail.difficulty,
+                "groomed": trail.groomed,
+            }
+            for trail in data.trails.values()
+            if tram.area and trail.area == tram.area
+        ],
+    }
+
+
+def _trails_by_difficulty(data: ResortData) -> dict[str, Any]:
+    counts = {name: {"open": 0, "total": 0} for name in DIFFICULTIES}
+    for trail in data.trails.values():
+        name = (trail.difficulty or "").strip().lower().replace(" ", "_")
+        if name in counts:
+            counts[name]["total"] += 1
+            if is_open(trail.status):
+                counts[name]["open"] += 1
+    return counts
+
+
+def _parks_attrs(data: ResortData) -> dict[str, Any]:
+    return {
+        park.name: {
+            "status": park.status,
+            "difficulty": park.difficulty,
+            "groomed": park.groomed,
+            "area": park.area,
+        }
+        for park in data.parks
+    }
+
+
+def _parking_attrs(data: ResortData) -> dict[str, Any]:
+    return {
+        lot.name: {
+            "status": lot.status,
+            "percent_full": lot.percent_full,
+            "open_time": lot.open_time,
+            "closed_time": lot.closed_time,
+            "alert": lot.alert,
+        }
+        for lot in data.parking
+    }
+
+
+def _forecast_high_attrs(data: ResortData) -> dict[str, Any]:
+    if not data.forecast:
+        return {}
+    today = data.forecast[0]
+    return {
+        "period": today.name,
+        "condition": today.weather,
+        "high": today.high,
+        "low": today.low,
+        "details": today.text,
+    }
+
+
+SENSORS: tuple[BigSkySensorDescription, ...] = (
+    BigSkySensorDescription(
+        key="snow_depth",
+        translation_key="snow_depth",
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfLength.INCHES,
+        value_fn=lambda data: data.snow_base,
+    ),
+    _snow("snowfall_24h", lambda data: data.snow_24h),
+    _snow("snowfall_48h", lambda data: data.snow_48h),
+    _snow("snowfall_72h", lambda data: data.snow_72h),
+    _snow("snowfall_7d", lambda data: data.snow_7d),
+    BigSkySensorDescription(
+        key="forecast_high",
+        translation_key="forecast_high",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.FAHRENHEIT,
+        value_fn=lambda data: data.forecast[0].high if data.forecast else None,
+        attrs_fn=_forecast_high_attrs,
+    ),
+    BigSkySensorDescription(
+        key="terrain_parks",
+        translation_key="terrain_parks",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.parks_open,
+        attrs_fn=_parks_attrs,
+    ),
+    BigSkySensorDescription(
+        key="trails_open",
+        translation_key="trails_open",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.trails_open,
+        attrs_fn=_trails_by_difficulty,
+    ),
+    BigSkySensorDescription(
+        key="lifts_open",
+        translation_key="lifts_open",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.lifts_open,
+    ),
+    BigSkySensorDescription(
+        key="tram",
+        translation_key="tram",
+        value_fn=lambda data: tram.status if (tram := _find_tram(data)) else None,
+        attrs_fn=_tram_attrs,
+    ),
+    BigSkySensorDescription(
+        key="parking",
+        translation_key="parking",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: sum(1 for lot in data.parking if is_open(lot.status)),
+        attrs_fn=_parking_attrs,
+    ),
+    BigSkySensorDescription(
+        key="shuttle",
+        translation_key="shuttle",
+        value_fn=lambda data: data.shuttle.get("status") if data.shuttle else None,
+        attrs_fn=lambda data: dict(data.shuttle or {}),
+    ),
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    entry: BigSkyConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Big Sky Resort sensors."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
-    
-    sensors = [
-        BigSkySnowDepthSensor(coordinator),
-        BigSkySnowfall24hSensor(coordinator),
-        BigSkyCurrentWeatherSensor(coordinator),
-        BigSkyTerrainParksSensor(coordinator),
-        BigSkyTrailsByDifficultySensor(coordinator),
-        BigSkyTramSensor(coordinator),
-        BigSkyParkingSensor(coordinator),
-        BigSkyShuttleSensor(coordinator),
-    ]
+    coordinator = entry.runtime_data
+    async_add_entities(BigSkySensor(coordinator, description) for description in SENSORS)
 
-    async_add_entities(sensors)
 
-class BigSkySnowDepthSensor(CoordinatorEntity, SensorEntity):
-    """Snow depth sensor."""
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Snow Depth"
-        self._attr_unique_id = "big_sky_snow_depth"
-        self._attr_device_class = SensorDeviceClass.DISTANCE
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = UnitOfLength.INCHES
-        self._attr_icon = "mdi:ruler"
+class BigSkySensor(BigSkyEntity, SensorEntity):
+    """A value read from the mountain report."""
+
+    entity_description: BigSkySensorDescription
+
+    def __init__(
+        self, coordinator: BigSkyCoordinator, description: BigSkySensorDescription
+    ) -> None:
+        super().__init__(coordinator, description.key)
+        self.entity_description = description
 
     @property
-    def native_value(self):
-        """Return snow depth."""
-        return float(self.coordinator.data["report"]["currentConditions"]["resortLocations"]["location"]["@base"])
-
-class BigSkySnowfall24hSensor(CoordinatorEntity, SensorEntity):
-    """24h snowfall sensor."""
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky 24h Snowfall"
-        self._attr_unique_id = "big_sky_snowfall_24h"
-        self._attr_device_class = SensorDeviceClass.DISTANCE
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = UnitOfLength.INCHES
-        self._attr_icon = "mdi:weather-snowy-heavy"
+    def native_value(self) -> float | int | str | None:
+        return self.entity_description.value_fn(self.coordinator.data)
 
     @property
-    def native_value(self):
-        """Return 24h snowfall."""
-        return float(self.coordinator.data["report"]["currentConditions"]["resortLocations"]["location"]["@snow24Hours"])
-
-class BigSkyTerrainParksSensor(CoordinatorEntity, SensorEntity):
-    """Terrain parks sensor."""
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Terrain Parks"
-        self._attr_unique_id = "big_sky_terrain_parks"
-        self._attr_icon = "mdi:snowboard"
-
-    @property
-    def native_value(self):
-        """Return number of open parks."""
-        return self.coordinator.data["report"]["currentConditions"]["resortwide"]["@numParksOpen"]
-
-    @property
-    def extra_state_attributes(self):
-        """Return park details."""
-        parks_data = {}
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if "freestyleTerrain" in area and "parks" in area["freestyleTerrain"]:
-                    parks = area["freestyleTerrain"]["parks"]["park"]
-                    if isinstance(parks, list):
-                        for park in parks:
-                            parks_data[park["@name"]] = {
-                                "status": park["@status"],
-                                "difficulty": park["@difficulty"],
-                                "groomed": park.get("@groomedOrCut", "")
-                            }
-                    else:
-                        parks_data[parks["@name"]] = {
-                            "status": parks["@status"],
-                            "difficulty": parks["@difficulty"],
-                            "groomed": parks.get("@groomedOrCut", "")
-                        }
-        return parks_data
-
-class BigSkyTrailsByDifficultySensor(CoordinatorEntity, SensorEntity):
-    """Trails by difficulty sensor."""
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Trails by Difficulty"
-        self._attr_unique_id = "big_sky_trails_by_difficulty"
-        self._attr_icon = "mdi:ski"
-
-    @property
-    def native_value(self):
-        """Return total open trails."""
-        return self.coordinator.data["report"]["currentConditions"]["resortwide"]["@numTrailsOpen"]
-
-    @property
-    def extra_state_attributes(self):
-        """Return trail counts by difficulty."""
-        difficulties = {
-            "beginner": {"open": 0, "total": 0},
-            "intermediate": {"open": 0, "total": 0},
-            "advanced": {"open": 0, "total": 0},
-            "expert": {"open": 0, "total": 0},
-            "high_exposure": {"open": 0, "total": 0}
-        }
-        
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if "trails" in area:
-                    trails = area["trails"]["trail"]
-                    if isinstance(trails, list):
-                        for trail in trails:
-                            diff = trail["@difficulty"].lower().replace(" ", "_")
-                            if diff in difficulties:
-                                difficulties[diff]["total"] += 1
-                                if trail["@status"].lower() == "open":
-                                    difficulties[diff]["open"] += 1
-        return difficulties
-
-class BigSkyTramSensor(CoordinatorEntity, SensorEntity):
-    """Lone Peak Tram sensor."""
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Tram"
-        self._attr_unique_id = "big_sky_tram"
-        self._attr_icon = "mdi:ski-lift"
-
-    @property
-    def native_value(self):
-        """Return tram status."""
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == "Lone Peak Area":
-                    if "lifts" in area:
-                        tram = area["lifts"]["lift"]
-                        return tram["@status"]
-        return "Unknown"
-
-    @property
-    def extra_state_attributes(self):
-        """Return tram details."""
-        tram_data = {}
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == "Lone Peak Area":
-                    if "lifts" in area:
-                        tram = area["lifts"]["lift"]
-                        tram_data.update({
-                            "capacity": tram["@capacity"],
-                            "type": tram["@type"],
-                            "status_detail": tram["@statusDetail"],
-                            "open_time": tram["@openTime"],
-                            "close_time": tram["@closeTime"],
-                            "skier_wait_time": tram.get("@skierWaitTime", ""),
-                            "scenic_wait_time": tram.get("@scenicWaitTime", ""),
-                            "serviced_trails": self._get_serviced_trails(area)
-                        })
-        return tram_data
-
-    def _get_serviced_trails(self, area):
-        """Get trails serviced by tram."""
-        serviced_trails = []
-        if "trails" in area:
-            trails = area["trails"]["trail"]
-            if isinstance(trails, list):
-                for trail in trails:
-                    serviced_trails.append({
-                        "name": trail["@name"],
-                        "status": trail["@status"],
-                        "difficulty": trail["@difficulty"],
-                        "groomed": trail.get("@groomed", "")
-                    })
-        return serviced_trails
-
-class BigSkyParkingSensor(CoordinatorEntity, SensorEntity):
-   """Parking status sensor."""
-   def __init__(self, coordinator):
-       super().__init__(coordinator)
-       self._attr_name = "Big Sky Parking"
-       self._attr_unique_id = "big_sky_parking"
-       self._attr_icon = "mdi:parking"
-
-   @property
-   def native_value(self):
-       """Return number of open lots."""
-       lots = self.coordinator.data["report"]["facilities"]["parking"]["lot"]
-       return len([lot for lot in lots if lot["@status"] == "open"]) if isinstance(lots, list) else 0
-
-   @property
-   def extra_state_attributes(self):
-       """Return lot details."""
-       lots = self.coordinator.data["report"]["facilities"]["parking"]["lot"]
-       return {lot["@name"]: {
-           "status": lot["@status"],
-           "percent_full": lot["@percentFull"],
-           "open_time": lot["@openTime"],
-           "closed_time": lot["@closedTime"],
-           "alert": lot["@alert"]
-       } for lot in lots} if isinstance(lots, list) else {}
-
-class BigSkyShuttleSensor(CoordinatorEntity, SensorEntity):
-   """Shuttle status sensor."""
-   def __init__(self, coordinator):
-       super().__init__(coordinator)
-       self._attr_name = "Big Sky Shuttle"
-       self._attr_unique_id = "big_sky_shuttle"
-       self._attr_icon = "mdi:bus"
-
-   @property
-   def native_value(self):
-       """Return shuttle status."""
-       return self.coordinator.data["report"]["facilities"]["shuttles"]["line"]["@status"]
-
-   @property
-   def extra_state_attributes(self):
-       """Return shuttle details."""
-       shuttle = self.coordinator.data["report"]["facilities"]["shuttles"]["line"]
-       return {
-           "number_running": shuttle["@numberRunning"],
-           "open_time": shuttle["@openTime"],
-           "closed_time": shuttle["@closedTime"],
-           "comment": shuttle["@comment"],
-           "alert": shuttle["@alert"]
-       }
-
-class BigSkyCurrentWeatherSensor(CoordinatorEntity, SensorEntity):
-   """Current weather sensor."""
-   def __init__(self, coordinator):
-       super().__init__(coordinator)
-       self._attr_name = "Big Sky Current Weather"
-       self._attr_unique_id = "big_sky_current_weather"
-       self._attr_icon = "mdi:weather-partly-cloudy"
-       self._attr_device_class = SensorDeviceClass.TEMPERATURE
-       self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-
-   @property
-   def native_value(self):
-       """Return current temperature."""
-       try:
-           return float(self.coordinator.data["report"]["forecast"]["day"][0]["@high"])
-       except (KeyError, IndexError, ValueError):
-           return None
-
-   @property
-   def extra_state_attributes(self):
-       """Return weather details."""
-       try:
-           current = self.coordinator.data["report"]["forecast"]["day"][0]
-           return {
-               "condition": current["@weather"],
-               "high": current["@high"],
-               "low": current["@low"],
-               "details": current.get("#text", "")
-           }
-       except (KeyError, IndexError):
-           return {}
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(self.coordinator.data)
