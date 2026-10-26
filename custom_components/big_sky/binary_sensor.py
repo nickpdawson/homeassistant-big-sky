@@ -1,268 +1,174 @@
 """Binary sensors for Big Sky Resort."""
 from __future__ import annotations
 
-from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
-    BinarySensorDeviceClass,
-)
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from typing import Any
 
-from .const import (
-    DOMAIN,
-    CONF_CREATE_LIFT_ENTITIES,
-    CONF_CREATE_RUN_ENTITIES,
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
 )
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+
+from .const import CONF_CREATE_LIFT_ENTITIES, CONF_CREATE_RUN_ENTITIES
+from .coordinator import BigSkyConfigEntry, BigSkyCoordinator, entry_config
+from .entity import BigSkyEntity
+from .feed import Lift, Trail, is_open
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    entry: BigSkyConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Big Sky binary sensors based on config entry options."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
-    entities = []
+    """Set up Big Sky binary sensors."""
+    coordinator = entry.runtime_data
+    config = entry_config(entry)
+    data = coordinator.data
 
-    # Resort status and snow making sensors
-    entities.extend([
+    entities: list[BinarySensorEntity] = [
         BigSkyResortStatusBinarySensor(coordinator),
-        BigSkySnowMakingBinarySensor(coordinator)
-    ])
-
-    # Conditionally add lift and trail sensors based on config
-    if config_entry.data.get(CONF_CREATE_LIFT_ENTITIES, True):
-        areas = coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if "lifts" in area:
-                    area_lifts = area["lifts"]["lift"]
-                    if isinstance(area_lifts, list):
-                        for lift in area_lifts:
-                            entities.append(
-                                BigSkyLiftBinarySensor(
-                                    coordinator,
-                                    lift["@name"],
-                                    area["@name"],
-                                    lift["@type"]
-                                )
-                            )
-                    else:
-                        entities.append(
-                            BigSkyLiftBinarySensor(
-                                coordinator,
-                                area_lifts["@name"],
-                                area["@name"],
-                                area_lifts["@type"]
-                            )
-                        )
-
-    if config_entry.data.get(CONF_CREATE_RUN_ENTITIES, True):
-        areas = coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if "trails" in area:
-                    trails = area["trails"]["trail"]
-                    if isinstance(trails, list):
-                        for trail in trails:
-                            entities.append(
-                                BigSkyTrailBinarySensor(
-                                    coordinator,
-                                    trail["@name"],
-                                    area["@name"],
-                                    trail["@difficulty"]
-                                )
-                            )
-                    else:
-                        entities.append(
-                            BigSkyTrailBinarySensor(
-                                coordinator,
-                                trails["@name"],
-                                area["@name"],
-                                trails["@difficulty"]
-                            )
-                        )
-
+        BigSkySnowmakingBinarySensor(coordinator),
+    ]
+    if config.get(CONF_CREATE_LIFT_ENTITIES, True):
+        entities.extend(BigSkyLiftBinarySensor(coordinator, lift) for lift in data.lifts.values())
+    if config.get(CONF_CREATE_RUN_ENTITIES, True):
+        entities.extend(
+            BigSkyTrailBinarySensor(coordinator, trail) for trail in data.trails.values()
+        )
     async_add_entities(entities)
 
 
-class BigSkyResortStatusBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    """Binary sensor for resort open/closed status."""
+class BigSkyResortStatusBinarySensor(BigSkyEntity, BinarySensorEntity):
+    """On when the resort reports Open."""
 
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Resort Status"
-        self._attr_unique_id = "big_sky_resort_open"
-        self._attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_translation_key = "resort_status"
+    _attr_device_class = BinarySensorDeviceClass.OPENING
+
+    def __init__(self, coordinator: BigSkyCoordinator) -> None:
+        super().__init__(coordinator, "resort_status")
 
     @property
     def is_on(self) -> bool:
-        """Return true if the resort is open."""
-        return self.coordinator.data["report"]["operations"]["@resortStatus"].lower() == "open"
+        return is_open(self.coordinator.data.resort_status)
 
     @property
-    def extra_state_attributes(self):
-        """Return additional resort status information."""
-        operations = self.coordinator.data["report"]["operations"]
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        return {"open_time": data.open_time, "close_time": data.close_time}
+
+
+class BigSkySnowmakingBinarySensor(BigSkyEntity, BinarySensorEntity):
+    """On when any trail has snowmaking."""
+
+    _attr_translation_key = "snowmaking"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+
+    def __init__(self, coordinator: BigSkyCoordinator) -> None:
+        super().__init__(coordinator, "snowmaking")
+
+    @property
+    def is_on(self) -> bool | None:
+        count = self.coordinator.data.trails_snowmaking
+        return None if count is None else count > 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"trails_with_snowmaking": self.coordinator.data.trails_snowmaking}
+
+
+def _lift_icon(lift_type: str | None) -> str:
+    lift_type = (lift_type or "").lower()
+    if "tram" in lift_type or "gondola" in lift_type:
+        return "mdi:gondola"
+    if "carpet" in lift_type:
+        return "mdi:conveyor-belt"
+    if "poma" in lift_type or "rope" in lift_type:
+        return "mdi:ski"
+    return "mdi:ski-lift"
+
+
+def _trail_icon(difficulty: str | None) -> str:
+    difficulty = (difficulty or "").lower()
+    if "expert" in difficulty or "exposure" in difficulty:
+        return "mdi:terrain"
+    if difficulty == "advanced":
+        return "mdi:slope-downhill"
+    if "intermediate" in difficulty:
+        return "mdi:ski"
+    return "mdi:ski-water"
+
+
+class BigSkyLiftBinarySensor(BigSkyEntity, BinarySensorEntity):
+    """On when the lift is running."""
+
+    _attr_translation_key = "lift"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+
+    def __init__(self, coordinator: BigSkyCoordinator, lift: Lift) -> None:
+        super().__init__(coordinator, f"lift_{lift.key}")
+        self._key = lift.key
+        self._attr_translation_placeholders = {"name": lift.name}
+        self._attr_icon = _lift_icon(lift.type)
+
+    @property
+    def _lift(self) -> Lift | None:
+        return self.coordinator.data.lifts.get(self._key)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._lift is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return is_open(lift.status) if (lift := self._lift) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if (lift := self._lift) is None:
+            return {}
         return {
-            "open_time": operations["@openTime"],
-            "close_time": operations["@closeTime"]
+            "type": lift.type,
+            "capacity": lift.capacity,
+            "area": lift.area,
+            "status": lift.status,
+            "open_time": lift.open_time,
+            "close_time": lift.close_time,
+            "status_detail": lift.status_detail,
         }
 
 
-class BigSkyLiftBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    """Binary sensor for lift status."""
+class BigSkyTrailBinarySensor(BigSkyEntity, BinarySensorEntity):
+    """On when the trail is open."""
 
-    def __init__(self, coordinator, lift_name, area_name, lift_type):
-        """Initialize lift binary sensor."""
-        super().__init__(coordinator)
-        self._lift_name = lift_name
-        self._area_name = area_name
-        self._lift_type = lift_type
-        self._attr_name = f"Lift {lift_name}"
-        self._attr_unique_id = f"big_sky_lift_{lift_name.lower().replace(' ', '_')}"
-        self._attr_device_class = BinarySensorDeviceClass.RUNNING
-       # Set different icons based on lift type
-        if "Tram" in lift_type:
-            self._attr_icon = "mdi:ski-lift"
-        elif "Carpet" in lift_type:
-            self._attr_icon = "mdi:conveyor-belt"
-        elif "Poma" in lift_type or "Rope" in lift_type:
-            self._attr_icon = "mdi:ski"
-        else:
-            self._attr_icon = "mdi:chair-rolling"
+    _attr_translation_key = "trail"
+    _attr_device_class = BinarySensorDeviceClass.OPENING
+
+    def __init__(self, coordinator: BigSkyCoordinator, trail: Trail) -> None:
+        super().__init__(coordinator, f"trail_{trail.key}")
+        self._key = trail.key
+        self._attr_translation_placeholders = {"name": trail.name}
+        self._attr_icon = _trail_icon(trail.difficulty)
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the lift is open."""
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == self._area_name and "lifts" in area:
-                    lifts = area["lifts"]["lift"]
-                    if isinstance(lifts, list):
-                        for lift in lifts:
-                            if lift["@name"] == self._lift_name:
-                                return lift["@status"].lower() == "open"
-                    elif lifts["@name"] == self._lift_name:
-                        return lifts["@status"].lower() == "open"
-        return False
+    def _trail(self) -> Trail | None:
+        return self.coordinator.data.trails.get(self._key)
 
     @property
-    def extra_state_attributes(self):
-        """Return additional lift status information."""
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == self._area_name and "lifts" in area:
-                    lifts = area["lifts"]["lift"]
-                    if isinstance(lifts, list):
-                        for lift in lifts:
-                            if lift["@name"] == self._lift_name:
-                                return {
-                                    "type": lift["@type"],
-                                    "capacity": lift.get("@capacity", ""),
-                                    "area": self._area_name,
-                                    "open_time": lift.get("@openTime", ""),
-                                    "close_time": lift.get("@closeTime", ""),
-                                    "status_detail": lift.get("@statusDetail", "")
-                                }
-                    elif lifts["@name"] == self._lift_name:
-                        return {
-                            "type": lifts["@type"],
-                            "capacity": lifts.get("@capacity", ""),
-                            "area": self._area_name,
-                            "open_time": lifts.get("@openTime", ""),
-                            "close_time": lifts.get("@closeTime", ""),
-                            "status_detail": lifts.get("@statusDetail", "")
-                        }
-        return {}
-
-class BigSkyTrailBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    """Binary sensor for trail status."""
-
-    def __init__(self, coordinator, trail_name, area_name, difficulty):
-        """Initialize trail binary sensor."""
-        super().__init__(coordinator)
-        self._trail_name = trail_name
-        self._area_name = area_name
-        self._difficulty = difficulty
-        self._attr_name = f"Trail {trail_name}"
-        self._attr_unique_id = f"big_sky_trail_{trail_name.lower().replace(' ', '_')}"
-        self._attr_device_class = BinarySensorDeviceClass.RUNNING
-        
-        # Set different icons based on difficulty
-        if "expert" in difficulty.lower():
-            self._attr_icon = "mdi:terrain"
-        elif "advanced" in difficulty.lower():
-            self._attr_icon = "mdi:slope-downhill"
-        elif "intermediate" in difficulty.lower():
-            self._attr_icon = "mdi:ski"
-        else:
-            self._attr_icon = "mdi:ski-water"
+    def available(self) -> bool:
+        return super().available and self._trail is not None
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the trail is open."""
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == self._area_name and "trails" in area:
-                    trails = area["trails"]["trail"]
-                    if isinstance(trails, list):
-                        for trail in trails:
-                            if trail["@name"] == self._trail_name:
-                                return trail["@status"].lower() == "open"
-                    elif trails["@name"] == self._trail_name:
-                        return trails["@status"].lower() == "open"
-        return False
+    def is_on(self) -> bool | None:
+        return is_open(trail.status) if (trail := self._trail) else None
 
     @property
-    def extra_state_attributes(self):
-        """Return additional trail status information."""
-        areas = self.coordinator.data["report"]["facilities"]["areas"]["area"]
-        if isinstance(areas, list):
-            for area in areas:
-                if area["@name"] == self._area_name and "trails" in area:
-                    trails = area["trails"]["trail"]
-                    if isinstance(trails, list):
-                        for trail in trails:
-                            if trail["@name"] == self._trail_name:
-                                return {
-                                    "difficulty": trail["@difficulty"],
-                                    "area": self._area_name,
-                                    "groomed": trail.get("@groomed", "no"),
-                                    "uphill": trail.get("@uphill", "no")
-                                }
-                    elif trails["@name"] == self._trail_name:
-                        return {
-                            "difficulty": trails["@difficulty"],
-                            "area": self._area_name,
-                            "groomed": trails.get("@groomed", "no"),
-                            "uphill": trails.get("@uphill", "no")
-                        }
-        return {}
-
-class BigSkySnowMakingBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    """Binary sensor for snow making status."""
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-        self._attr_name = "Big Sky Snow Making"
-        self._attr_unique_id = "big_sky_snow_making"
-        self._attr_device_class = BinarySensorDeviceClass.RUNNING
-        self._attr_icon = "mdi:snowflake"
-
-    @property
-    def is_on(self) -> bool:
-        """Return true if snow making is active."""
-        return int(self.coordinator.data["report"]["currentConditions"]["resortwide"]["@numTrailsSnowMaking"]) > 0
-
-    @property
-    def extra_state_attributes(self):
-        """Return number of trails with snowmaking."""
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if (trail := self._trail) is None:
+            return {}
         return {
-            "trails_with_snowmaking": self.coordinator.data["report"]["currentConditions"]["resortwide"]["@numTrailsSnowMaking"]
+            "difficulty": trail.difficulty,
+            "area": trail.area,
+            "status": trail.status,
+            "groomed": trail.groomed,
         }
