@@ -1,13 +1,19 @@
 """Setup, unload, reload, entity and migration tests."""
 from __future__ import annotations
 
+import re
+
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.big_sky.const import DEFAULT_FEED_URL, DOMAIN
+from custom_components.big_sky.const import (
+    CONF_CREATE_LIFT_ENTITIES,
+    DEFAULT_FEED_URL,
+    DOMAIN,
+)
 from custom_components.big_sky.diagnostics import async_get_config_entry_diagnostics
 
 
@@ -143,6 +149,92 @@ async def test_unique_id_migration(hass: HomeAssistant, mock_feed, config_entry)
     assert hass.states.get(old_lift.entity_id) is not None
     assert hass.states.get("binary_sensor.big_sky_resort_lift_lone_peak_tram") is None
     assert registry.async_get(unknown.entity_id).unique_id == "big_sky_trail_gone_trail"
+
+
+def _without(feed_xml: str, tag: str, name: str) -> str:
+    feed, count = re.subn(rf'<{tag} name="{name}"[^>]*/>', "", feed_xml)
+    assert count == 1
+    return feed
+
+
+async def _refresh(hass: HomeAssistant, aioclient_mock, entry, feed: str) -> None:
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(DEFAULT_FEED_URL, text=feed)
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+
+async def test_new_items_added_on_refresh(
+    hass: HomeAssistant, aioclient_mock, feed_xml, config_entry
+) -> None:
+    """Winter lifts and trails that show up later get entities without a reload."""
+    summer = _without(_without(feed_xml, "lift", "Bear Back"), "trail", "Little Thunder")
+    aioclient_mock.get(DEFAULT_FEED_URL, text=summer)
+    await _setup(hass, config_entry)
+    lift_id = "binary_sensor.big_sky_resort_lift_bear_back"
+    trail_id = "binary_sensor.big_sky_resort_trail_little_thunder"
+    assert hass.states.get(lift_id) is None
+    assert hass.states.get(trail_id) is None
+
+    await _refresh(hass, aioclient_mock, config_entry, feed_xml)
+    assert hass.states.get(lift_id).state == STATE_OFF
+    assert hass.states.get(trail_id).state == STATE_OFF
+    registry = er.async_get(hass)
+    assert registry.async_get(lift_id).unique_id == f"{config_entry.entry_id}_lift_1222"
+
+    # Gone again: the entity stays and goes unavailable.
+    await _refresh(hass, aioclient_mock, config_entry, summer)
+    assert hass.states.get(lift_id).state == STATE_UNAVAILABLE
+    assert registry.async_get(lift_id) is not None
+
+
+async def test_new_items_respect_options(
+    hass: HomeAssistant, aioclient_mock, feed_xml, config_entry
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        data={**config_entry.data, CONF_CREATE_LIFT_ENTITIES: False},
+    )
+    aioclient_mock.get(DEFAULT_FEED_URL, text=_without(feed_xml, "lift", "Bear Back"))
+    await _setup(hass, entry)
+    await _refresh(hass, aioclient_mock, entry, feed_xml)
+    assert hass.states.get("binary_sensor.big_sky_resort_lift_bear_back") is None
+    assert hass.states.get("binary_sensor.big_sky_resort_trail_little_thunder") is not None
+
+
+async def test_legacy_entry_migrated_when_item_returns(
+    hass: HomeAssistant, aioclient_mock, feed_xml, config_entry
+) -> None:
+    """A pre-1.1 entry for a lift missing at setup keeps its entity_id when the lift returns."""
+    config_entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    old = registry.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        "big_sky_lift_bear_back",
+        config_entry=config_entry,
+        suggested_object_id="lift_bear_back_poma",
+    )
+    assert old.entity_id == "binary_sensor.lift_bear_back_poma"
+
+    aioclient_mock.get(DEFAULT_FEED_URL, text=_without(feed_xml, "lift", "Bear Back"))
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert registry.async_get(old.entity_id).unique_id == "big_sky_lift_bear_back"
+
+    await _refresh(hass, aioclient_mock, config_entry, feed_xml)
+
+    new_unique_id = f"{config_entry.entry_id}_lift_1222"
+    assert registry.async_get(old.entity_id).unique_id == new_unique_id
+    assert hass.states.get(old.entity_id).state == STATE_OFF
+    assert hass.states.get("binary_sensor.big_sky_resort_lift_bear_back") is None
+    matches = [
+        e
+        for e in er.async_entries_for_config_entry(registry, config_entry.entry_id)
+        if e.unique_id == new_unique_id
+    ]
+    assert len(matches) == 1
 
 
 async def test_migrate_v1_entry(hass: HomeAssistant, mock_feed) -> None:
